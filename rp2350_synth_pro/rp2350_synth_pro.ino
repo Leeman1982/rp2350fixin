@@ -618,9 +618,6 @@ void setup() {
   config.i2s_format = I2S_STD_FORMAT;
   config.buffer_size = 256;
   config.buffer_count = 4;
-  config.auto_clear = true;
-  config.is_master = true;  // RP2350 is the I2S master
-  config.use_apll = false;  // Don't use audio PLL on RP2350
 
   Serial.println("Starting I2S stream...");
   if (!i2s.begin(config)) {
@@ -634,9 +631,6 @@ void setup() {
       Serial.println("I2S FAILED - System halted");
     }
   }
-
-  // Explicitly start the I2S
-  i2s.setVolume(1.0);
 
   // Give I2S time to stabilize
   delay(200);
@@ -711,6 +705,7 @@ void setup() {
   Serial.println("Program Change 0-11 for presets");
   Serial.println("Send MIDI notes to hear sound!");
   Serial.println("========================================");
+}
 
 void loop() {
   MIDI.read();
