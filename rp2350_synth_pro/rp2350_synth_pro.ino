@@ -217,15 +217,20 @@ bool popCommand(VoiceCommandMsg* msg) {
 void core1AudioLoop() {
   core1Running = true;
   int16_t audioBuffer[DMA_BUFFER_SIZE * 2];
-  
+
+  // Clear the buffer initially
+  for (int i = 0; i < DMA_BUFFER_SIZE * 2; i++) {
+    audioBuffer[i] = 0;
+  }
+
   while (true) {
     // Process up to 16 commands per audio block
     VoiceCommandMsg cmd;
     int cmdCount = 0;
-    
+
     while (popCommand(&cmd) && cmdCount < 16) {
       cmdCount++;
-      
+
       switch (cmd.cmd) {
         case CMD_NOTE_ON: {
           Voice* v = &voices[cmd.voiceIndex];
@@ -313,7 +318,19 @@ void core1AudioLoop() {
     
     // Generate audio block
     generateAudioBlock(audioBuffer, DMA_BUFFER_SIZE);
-    i2s.write((uint8_t*)audioBuffer, DMA_BUFFER_SIZE * 2 * sizeof(int16_t));
+
+    // Write to I2S
+    size_t bytesToWrite = DMA_BUFFER_SIZE * 2 * sizeof(int16_t);
+    size_t bytesWritten = i2s.write((uint8_t*)audioBuffer, bytesToWrite);
+
+    // Error check (only print occasionally to avoid flooding serial)
+    static uint32_t errorCount = 0;
+    if (bytesWritten != bytesToWrite) {
+      errorCount++;
+      if (errorCount % 1000 == 0) {
+        // Note: Printing from Core 1 might cause issues, but useful for debugging
+      }
+    }
   }
 }
 
@@ -321,15 +338,18 @@ void generateAudioBlock(int16_t* buffer, int samples) {
   // Get current modulation values
   const float modWheel = modWheelValue;
   const float pitchBend = pitchBendValue;
-  
+
   // Master tune + pitch bend
   const float masterTuneMult = fastPow2(masterTune / 1200.0f);
   const float pitchMult = fastPow2(pitchBend * PITCH_BEND_RANGE / 12.0f) * masterTuneMult;
-  
+
   // Process parameter smoothers
   float smoothedCutoff = processSmoother(&smoothCutoff);
   float smoothedResonance = processSmoother(&smoothResonance);
   float smoothedVolume = processSmoother(&smoothVolume);
+
+  // Ensure volume is not zero
+  if (smoothedVolume < 0.001f) smoothedVolume = 0.001f;
   
   for (int i = 0; i < samples; i++) {
     float mixL = 0.0f;
@@ -582,6 +602,12 @@ void setup() {
   MIDI.setHandleAfterTouchChannel(handleAftertouch);
   
   // Initialize I2S
+  Serial.println("Initializing I2S...");
+  Serial.println("Sample Rate: 48000 Hz");
+  Serial.println("Channels: 2 (Stereo)");
+  Serial.println("Bits per sample: 16");
+  Serial.println("I2S Pins - BCK:20, WS:21, DATA:22");
+
   auto config = i2s.defaultConfig(TX_MODE);
   config.sample_rate = SAMPLE_RATE;
   config.channels = CHANNELS;
@@ -592,11 +618,54 @@ void setup() {
   config.i2s_format = I2S_STD_FORMAT;
   config.buffer_size = 256;
   config.buffer_count = 4;
-  
+  config.auto_clear = true;
+  config.is_master = true;  // RP2350 is the I2S master
+  config.use_apll = false;  // Don't use audio PLL on RP2350
+
+  Serial.println("Starting I2S stream...");
   if (!i2s.begin(config)) {
-    Serial.println("I2S INIT FAILED!");
-    while(1) delay(1000);
+    Serial.println("ERROR: I2S begin() failed!");
+    Serial.println("Check:");
+    Serial.println("  1. AudioTools library is installed");
+    Serial.println("  2. I2S pins are correct (BCK=20, WS=21, DATA=22)");
+    Serial.println("  3. RP2350 board support is up to date");
+    while(1) {
+      delay(1000);
+      Serial.println("I2S FAILED - System halted");
+    }
   }
+
+  // Explicitly start the I2S
+  i2s.setVolume(1.0);
+
+  // Give I2S time to stabilize
+  delay(200);
+  Serial.println("I2S initialized successfully!");
+
+  // Send a test tone to verify I2S is working (440Hz A note for 0.5 seconds)
+  Serial.println("Sending 440Hz test tone for 0.5 seconds...");
+  Serial.println("You should hear a brief beep if I2S is working!");
+  int16_t testBuffer[256];
+  float phase = 0.0f;
+  float phaseInc = 440.0f / 48000.0f; // 440Hz at 48kHz
+
+  for (int i = 0; i < 24000 / 128; i++) { // 0.5 seconds worth
+    for (int j = 0; j < 128; j++) {
+      int16_t sample = (int16_t)(sin(phase * 6.283185f) * 20000);
+      testBuffer[j * 2] = sample;     // Left
+      testBuffer[j * 2 + 1] = sample; // Right
+      phase += phaseInc;
+      if (phase >= 1.0f) phase -= 1.0f;
+    }
+    size_t written = i2s.write((uint8_t*)testBuffer, 256 * sizeof(int16_t));
+    if (written != 256 * sizeof(int16_t)) {
+      Serial.print("Warning: I2S write incomplete: ");
+      Serial.print(written);
+      Serial.print(" / ");
+      Serial.println(256 * sizeof(int16_t));
+    }
+  }
+  Serial.println("Test tone complete! If you heard a beep, I2S is working.");
   
   // Initialize voices
   for (int i = 0; i < VOICES; i++) {
@@ -624,14 +693,24 @@ void setup() {
   
   // Update reverb parameters
   updateFreeVerbParams(&reverb, reverbSize, reverbDamp, reverbWidth, reverbMix);
-  
+
+  // Ensure I2S buffers are clear before starting audio core
+  Serial.println("Clearing I2S buffers...");
+  int16_t silence[256] = {0};
+  for (int i = 0; i < 10; i++) {
+    i2s.write((uint8_t*)silence, 256 * sizeof(int16_t));
+  }
+
   // Launch audio core
+  Serial.println("Launching audio core on Core 1...");
   multicore_launch_core1(core1AudioLoop);
   while (!core1Running) delay(10);
-  
+
+  Serial.println("========================================");
   Serial.println("Synth ready! Play some notes.");
   Serial.println("Program Change 0-11 for presets");
-}
+  Serial.println("Send MIDI notes to hear sound!");
+  Serial.println("========================================");
 
 void loop() {
   MIDI.read();
