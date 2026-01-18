@@ -334,7 +334,36 @@ void core1AudioLoop() {
   }
 }
 
+// Test tone generator for debugging
+static float testPhase = 0.0f;
+static int activeTestVoice = -1;
+
 void generateAudioBlock(int16_t* buffer, int samples) {
+  // Count active voices for debug
+  int activeCount = 0;
+  for (int i = 0; i < VOICES; i++) {
+    if (voices[i].active) {
+      activeCount++;
+      activeTestVoice = i;
+    }
+  }
+
+  // DEBUG: If any voice is active, generate a simple test tone
+  if (activeCount > 0) {
+    float freq = voices[activeTestVoice].targetFreq;
+    float phaseInc = freq / SAMPLE_RATE_F;
+
+    for (int i = 0; i < samples; i++) {
+      float sample = sin(testPhase * 6.283185f) * 0.3f * masterVol;
+      buffer[i * 2] = (int16_t)(sample * 20000.0f);
+      buffer[i * 2 + 1] = (int16_t)(sample * 20000.0f);
+
+      testPhase += phaseInc;
+      if (testPhase >= 1.0f) testPhase -= 1.0f;
+    }
+    return;  // Skip normal processing for now
+  }
+
   // Get current modulation values
   const float modWheel = modWheelValue;
   const float pitchBend = pitchBendValue;
@@ -720,7 +749,13 @@ void handleNoteOn(byte channel, byte note, byte velocity) {
     handleNoteOff(channel, note, 0);
     return;
   }
-  
+
+  // DEBUG: Print MIDI note received
+  Serial.print("MIDI Note ON: ");
+  Serial.print(note);
+  Serial.print(" Vel: ");
+  Serial.println(velocity);
+
   if (arpEnabled) {
     arpAddNote(note, velocity);
   } else {
